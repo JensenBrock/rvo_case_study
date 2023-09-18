@@ -1,0 +1,17 @@
+---
+title: "rvo_project"
+author: "Jensen brock"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Libraries
+library(tidyverse)
+library(readxl)
+
+# Data
+data_raw <- read_excel("data/Personal_Loans_Dataset_(Data).xlsx")
+
+```
