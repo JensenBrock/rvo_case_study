@@ -1,0 +1,359 @@
+---
+title: "rvo_project"
+author: "Jensen brock"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#set seed
+set.seed(42)
+
+# Libraries
+library(tidyverse)
+library(readxl)
+library(broom)
+library(scales)
+library(modelsummary)
+library(MatchIt)
+library(class)
+library(caTools)
+library(AICcmodavg)
+
+
+# Data
+data_raw <- read_excel("data/Personal_Loans_Dataset_(Data).xlsx") 
+
+
+data_clean <- data_raw %>% 
+  mutate(
+    possible_payout = case_when(
+                    Lender == "A" ~ 250
+                  , Lender == "B" ~ 350
+                  , Lender == "C" ~ 150
+                                      )
+    , net_income = Monthly_Gross_Income - Monthly_Housing_Payment) %>% 
+  rename(
+      user_id = `User ID`
+    , reason = Reason
+    , loan_amount = Loan_Amount
+    , fico_score = FICO_score
+    , fico_score_group= Fico_Score_group
+    , employment_status = Employment_Status
+    , employment_sector = Employment_Sector
+    , monthly_gross_inc = Monthly_Gross_Income
+    , house_pmt_mo = Monthly_Housing_Payment
+    , ever_bankrupt_foreclose = Ever_Bankrupt_or_Foreclose
+    , lender = Lender
+    , approved = Approved
+  )
+
+```
+
+
+# Explore the Data
+```{r summary}
+summary(data_clean)
+```
+
+## Review breakdown of key numeric variables by primary dimensions
+```{r}
+data_clean %>%
+  group_by(lender) %>% 
+  summarise(
+      approval_rate = mean(approved)
+    , avg_loan_amount = mean(loan_amount)
+    , avg_fico = mean(fico_score)
+    , avg_inc = mean(monthly_gross_inc)
+    , pct_bankrupt_foreclosed = mean(ever_bankrupt_foreclose)
+    , payout = mean(possible_payout)
+    , n_apps = n()
+  )
+```
+
+
+```{r summary-fico-group}
+data_clean %>%
+  group_by(fico_score_group) %>% 
+  summarise(
+      avg_loan_amount = mean(loan_amount)
+    , avg_fico = mean(fico_score)
+    , avg_inc = mean(monthly_gross_inc)
+    , approval_rate = mean(approved)
+    , pct_bankrupt_foreclosed = mean(ever_bankrupt_foreclose)
+  ) %>% 
+  arrange(avg_fico)
+```
+```{r summary-employment-status}
+data_clean %>%
+  group_by(employment_status) %>% 
+  summarise(
+      avg_loan_amount = mean(loan_amount)
+    , avg_fico = mean(fico_score)
+    , avg_inc = mean(monthly_gross_inc)
+    , approval_rate = mean(approved)
+    , pct_bankrupt_foreclosed = mean(ever_bankrupt_foreclose)
+  ) %>% 
+  arrange(approval_rate)
+```
+
+```{r summary-emp-sector}
+data_clean %>%
+  group_by(employment_sector) %>% 
+  summarise(
+      avg_loan_amount = mean(loan_amount)
+    , avg_fico = mean(fico_score)
+    , avg_inc = mean(monthly_gross_inc)
+    , approval_rate = mean(approved)
+    , pct_bankrupt_foreclosed = mean(ever_bankrupt_foreclose)
+  ) %>% 
+  arrange(approval_rate)
+```
+
+```{r summary-loan-reason}
+data_clean %>%
+  group_by(reason) %>% 
+  summarise(
+      avg_loan_amount = mean(loan_amount)
+    , avg_fico = mean(fico_score)
+    , avg_inc = mean(monthly_gross_inc)
+    , approval_rate = mean(approved)
+    , pct_bankrupt_foreclosed = mean(ever_bankrupt_foreclose)
+  ) %>% 
+  arrange(approval_rate)
+
+```
+## Review Distributions
+```{r fico-hist}
+data_clean %>% 
+  ggplot(mapping = aes(x = fico_score)) +
+  geom_histogram(
+              boundary = 600
+            , bins = 12
+            , color = "white")
+```
+
+```{r loan-amount-hist}
+data_clean %>% 
+  ggplot(mapping = aes(x = loan_amount)) +
+  geom_histogram(
+              binwidth = 10000
+            , boundary = 0
+            , color = "white") +
+  scale_x_continuous(breaks = seq(0, max(data_clean$loan_amount)
+                            , by = 10000)
+                     , labels = scales::dollar)
+```
+
+```{r inc-hist}
+data_clean %>% 
+  ggplot(mapping = aes(x = monthly_gross_inc)) +
+  geom_histogram(
+              binwidth = 1500
+            , boundary = 0
+            , color = "white") +
+  scale_x_continuous(breaks = seq(0, max(data_clean$monthly_gross_inc)
+                            , by = 3000)
+                     , labels = scales::dollar)
+```
+
+# Linear Probability model
+This is a simple model that generates the probability of a loan application 
+being approved. This is helpful for gaining understanding of how the various
+factors influence approval, but this would not be a useful prediction model
+due to the limitations of the Linear Probability Model.
+
+Secondly we learned from the LPM that loan reason is not a significant predictor
+of loan approval by itself in an LPM model. In the sections below I will use AIC
+to find the best fit model.
+```{r simple-lpm}
+lpm <- lm(approved ~ lender + fico_score + net_income + loan_amount
+                    + reason + employment_status, data = data_clean)
+summary(lpm)
+```
+
+# Logit Regression Model
+
+## Splitting Data into Training & Test
+```{r split-data}
+train <- data_clean %>% 
+  slice_sample(prop = 0.7)
+
+test <- data_clean %>% 
+  anti_join(train)
+  
+```
+
+## Train Logit Model
+```{r logit-model-v1}
+logit_model_1 <- glm(approved ~ lender + fico_score + net_income + loan_amount
+                    + employment_status + reason
+                , data = train
+                , family = binomial(link = "logit"))
+
+summary(logit_model_1)
+```
+
+```{r logit-model-v2}
+logit_model_2 <- glm(approved ~ lender + fico_score + net_income + loan_amount
+                    + employment_status + reason + reason*lender
+                , data = train
+                , family = binomial(link = "logit"))
+
+summary(logit_model_2)
+```
+
+```{r logit-model-v3}
+logit_model_3 <- glm(approved ~ lender + fico_score + net_income + loan_amount
+                    + employment_status
+                , data = train
+                , family = binomial(link = "logit"))
+
+summary(logit_model_3)
+```
+
+```{r logit-model-v4}
+logit_model_4 <- glm(approved ~ lender + fico_score + net_income + loan_amount
+                    + employment_status + lender*fico_score
+                , data = train
+                , family = binomial(link = "logit"))
+
+summary(logit_model_4)
+```
+
+```{r logit-model-v5}
+logit_model_5 <- glm(approved ~ lender + fico_score + net_income + loan_amount
+                  + employment_status + lender*fico_score + lender*net_income
+                , data = train
+                , family = binomial(link = "logit"))
+
+summary(logit_model_5)
+```
+
+```{r logit-model-final}
+logit_model <- glm(approved ~ lender + fico_score + net_income + loan_amount
+                  + employment_status + lender*fico_score + lender*net_income
+                   + loan_amount*fico_score
+                , data = train
+                , family = binomial(link = "logit"))
+
+summary(logit_model)
+```
+
+### Model fit test with AIC
+the more simple model that omits reason is the best fit model.
+```{r compare-models}
+models <- list(logit_model_1, logit_model_2, logit_model_3
+               , logit_model_4, logit_model_5, logit_model)
+model_names <- c("Fist Model", "Second Model", "Third Model"
+                 , "Fourth Model", "Fifth Model", "Final Model")
+
+aictab(cand.set = models, modnames = model_names)
+```
+
+## Fit test data to model
+```{r}
+testing <- test
+testing$prob <- predict.glm(logit_model, newdata = test, type = "response")
+
+
+test %>% 
+  mutate(output_test = if_else(prob>=0.5, 1, 0)
+       , correct = if_else(approved == output_test, 1,0)) %>% 
+  group_by(output_test) %>% 
+  summarise(count = n(),
+            correct = mean(correct))
+```
+
+## test splitting data by lender 
+```{r split-data, message=FALSE}
+data_a <- data_clean %>% 
+  filter(lender == "A")
+
+    train_a <- data_a %>% 
+      slice_sample(prop = 0.7)
+    
+    test_a <- data_a %>% 
+      anti_join(train_a)
+
+data_b <- data_clean %>% 
+  filter(lender == "B")
+
+    train_b <- data_b %>% 
+      slice_sample(prop = 0.7)
+    
+    test_b <- data_b %>% 
+      anti_join(train_b)
+
+data_c <- data_clean %>% 
+  filter(lender == "C")
+
+    train_c <- data_c %>% 
+      slice_sample(prop = 0.7)
+    
+    test_c <- data_c %>% 
+      anti_join(train_c)
+```
+
+### Logit Models
+```{r}
+logit_model_a <- glm(approved ~ fico_score + net_income + loan_amount
+                  + employment_status + loan_amount*fico_score
+                , data = train_a
+                , family = binomial(link = "logit"))
+
+logit_model_b <- glm(approved ~ fico_score + net_income + loan_amount
+                  + employment_status + loan_amount*fico_score
+                , data = train_b
+                , family = binomial(link = "logit"))
+
+logit_model_c <- glm(approved ~ fico_score + net_income + loan_amount
+                  + employment_status + loan_amount*fico_score
+                , data = train_c
+                , family = binomial(link = "logit"))
+```
+
+```{r fit-a}
+test_a$prob <- predict.glm(logit_model_a, newdata = test_a, type = "response")
+
+
+test_a %>% 
+  mutate(output_test = if_else(prob>=0.5, 1, 0)
+       , correct = if_else(approved == output_test, 1,0)) %>% 
+  group_by(output_test) %>% 
+  summarise(count = n(),
+            correct = mean(correct))
+```
+
+```{r fit-b}
+test_b$prob <- predict.glm(logit_model_b, newdata = test_b, type = "response")
+
+
+test_b %>% 
+  mutate(output_test = if_else(prob>=0.5, 1, 0)
+       , correct = if_else(approved == output_test, 1,0)) %>% 
+  group_by(output_test) %>% 
+  summarise(count = n(),
+            correct = mean(correct))
+```
+
+```{r fit-c}
+test_c$prob <- predict.glm(logit_model_c, newdata = test_c, type = "response")
+
+
+test_c %>% 
+  mutate(output_test = if_else(prob>=0.5, 1, 0)
+       , correct = if_else(approved == output_test, 1,0)) %>% 
+  group_by(output_test) %>% 
+  summarise(count = n(),
+            correct = mean(correct))
+```
+
+```{r}
+
+```
+
+
+
+

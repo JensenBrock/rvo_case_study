@@ -1,0 +1,310 @@
+---
+title: "rvo_project"
+author: "Jensen brock"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+#set seed
+set.seed(42)
+
+# Libraries
+library(tidyverse)
+library(kableExtra)
+library(readxl)
+library(broom)
+library(scales)
+library(MatchIt)
+library(class)
+library(caTools)
+library(AICcmodavg)
+
+
+# Data
+data_raw <- read_excel("data/Personal_Loans_Dataset_(Data).xlsx")
+
+
+data_clean <- data_raw %>% 
+  mutate(
+    possible_payout = case_when(
+                    Lender == "A" ~ 250
+                  , Lender == "B" ~ 350
+                  , Lender == "C" ~ 150
+                                      )
+    , net_income = Monthly_Gross_Income - Monthly_Housing_Payment) %>% 
+  rename(
+      user_id = `User ID`
+    , reason = Reason
+    , loan_amount = Loan_Amount
+    , fico_score = FICO_score
+    , fico_score_group= Fico_Score_group
+    , employment_status = Employment_Status
+    , employment_sector = Employment_Sector
+    , monthly_gross_inc = Monthly_Gross_Income
+    , house_pmt_mo = Monthly_Housing_Payment
+    , ever_bankrupt_foreclose = Ever_Bankrupt_or_Foreclose
+    , lender = Lender
+    , approved = Approved
+  )
+
+```
+
+
+# I: Variable Overview
+##Explore the Data
+### Summary Tables
+```{r general-summary}
+summary_data <- data_clean %>% 
+  summarise(
+    approval_rate = scales::percent(mean(approved))
+  , avg_fico_score = round(mean(fico_score),2)
+  , avg_loan_amount = scales::dollar(mean(loan_amount))
+  , avg_income = scales::dollar(mean(monthly_gross_inc))
+  , avg_house_pmt = scales::dollar(mean(house_pmt_mo))
+  , house_inc_ratio = scales::percent(sum(house_pmt_mo)/sum(monthly_gross_inc))
+  )
+
+summary_data
+```
+```{r summary-by-emp-status}
+data_clean %>% 
+  group_by(employment_status) %>% 
+  summarise(
+    approval_rate = scales::percent(mean(approved))
+  , avg_fico_score = round(mean(fico_score),2)
+  , avg_loan_amount = scales::dollar(mean(loan_amount))
+  , avg_income = scales::dollar(mean(monthly_gross_inc))
+  , avg_house_pmt = scales::dollar(mean(house_pmt_mo))
+  )
+```
+
+```{r lender-breakdown}
+lender_breakdown <- data_clean %>% 
+  group_by(lender) %>% 
+  summarise(n = n()
+          , approval_rate = mean(approved)
+          , avg_fico_score = mean(fico_score)
+          , avg_loan_amount = mean(loan_amount))
+
+lender_breakdown
+```
+
+
+```{r credit-score-breakdown, message=FALSE}
+credit_score_summary <- data_clean %>% 
+  group_by(lender, fico_score_group) %>% 
+  summarise(n = n()
+          , approval_rate = mean(approved)
+          , avg_fico_score = mean(fico_score)
+          , avg_loan_amount = mean(loan_amount)) %>% 
+  arrange(factor(fico_score_group, levels = c("excellent", "very_good"
+                                              , "good", "fair", "poor"))) 
+
+credit_score_summary 
+```
+
+```{r fico-group-summary}
+lender_fico_group <- data_clean %>% 
+  mutate(fico_score_excellent = if_else(fico_score_group=="excellent", 1, 0)
+       , fico_score_very_good = if_else(fico_score_group=="very_good", 1, 0)
+       , fico_score_good = if_else(fico_score_group=="good", 1, 0)
+       , fico_score_fair = if_else(fico_score_group=="fair", 1, 0)
+       , fico_score_poor = if_else(fico_score_group=="poor", 1, 0)) %>% 
+  group_by(lender) %>% 
+  summarise(excellent_percent = mean(fico_score_excellent)
+          , very_good_percent = mean(fico_score_very_good)
+          , good_percent = mean(fico_score_good)
+          , fair_percent = mean(fico_score_fair)
+          , poor_percent = mean(fico_score_poor)
+          , total_applications = n()
+  )
+
+lender_fico_group
+```
+
+### Data Distributions
+```{r fico-hist}
+data_clean %>% 
+  ggplot(mapping = aes(x = fico_score)) +
+  geom_histogram(
+              boundary = 600
+            , bins = 12
+            , color = "#FFFFFF"
+            , fill = "#300CE9") +
+  labs(title = "FICO Score Distribution") +
+  xlab("FICO Score") +
+  ylab("Count")
+```
+
+#### Loan Amount
+```{r loan-amount-hist}
+data_clean %>% 
+  ggplot(mapping = aes(x = loan_amount)) +
+  geom_histogram(
+              binwidth = 10000
+            , boundary = 0
+            , color = "#FFFFFF"
+            , fill = "#ED6B3E") +
+  scale_x_continuous(breaks = seq(0, max(data_clean$loan_amount)
+                            , by = 10000)
+                     , labels = scales::dollar) +
+  labs(title = "Loan Amount Distribution") +
+  xlab("Loan Amount") +
+  ylab("Count")
+```
+
+#### Income
+```{r inc-hist}
+data_clean %>% 
+  ggplot(mapping = aes(x = monthly_gross_inc)) +
+  geom_histogram(
+              binwidth = 1500
+            , boundary = 0
+            , color = "#FFFFFF"
+            , fill = "#168039") +
+  scale_x_continuous(breaks = seq(0, max(data_clean$monthly_gross_inc)
+                            , by = 3000)
+                     , labels = scales::dollar) +
+  labs(title = "Income Distribution") +
+  xlab("Monthly Gross Income") +
+  ylab("Count")
+```
+
+
+## Predictive Modeling
+Identify statistically significant variables to predict loan approval. Logistic
+Regression is used to model the probability that a loan will be approved.
+
+### Logistic Regression
+```{r data-setup, message=FALSE}
+# Training & Test Data
+train <- data_clean %>% 
+  slice_sample(prop = 0.7)
+
+test <- data_clean %>% 
+  anti_join(train)
+  
+# Model Training
+logit_model_1 <- glm(approved ~ lender + fico_score + monthly_gross_inc 
+                     + house_pmt_mo + loan_amount + employment_status + reason
+                , data = train
+                , family = binomial(link = "logit"))
+
+logit_model_2 <- glm(approved ~ lender + fico_score + net_income 
+                     + monthly_gross_inc + house_pmt_mo + loan_amount 
+                     + employment_status + reason + reason*lender
+                , data = train
+                , family = binomial(link = "logit"))
+
+logit_model_3 <- glm(approved ~ lender + fico_score + monthly_gross_inc 
+                     + house_pmt_mo + loan_amount  + employment_status
+                , data = train
+                , family = binomial(link = "logit"))
+
+logit_model_4 <- glm(approved ~ lender + fico_score + monthly_gross_inc 
+                     + house_pmt_mo + loan_amount + employment_status 
+                     + lender*fico_score
+                , data = train
+                , family = binomial(link = "logit"))
+
+logit_model_5 <- glm(approved ~ lender + fico_score + monthly_gross_inc 
+                     + house_pmt_mo + loan_amount + employment_status 
+                     + lender*fico_score + lender*monthly_gross_inc
+                , data = train
+                , family = binomial(link = "logit"))
+
+logit_model <- glm(approved ~ lender + fico_score + monthly_gross_inc 
+                    + house_pmt_mo + loan_amount + employment_status 
+                    + lender*fico_score + lender*monthly_gross_inc
+                    + loan_amount*fico_score
+                , data = train
+                , family = binomial(link = "logit"))
+```
+### Summary Stats Final Model
+```{r}
+tidy(logit_model)
+```
+
+
+### Model fit test with AIC
+```{r compare-models}
+models <- list(logit_model_1, logit_model_2, logit_model_3
+               , logit_model_4, logit_model_5, logit_model)
+model_names <- c("Fist Model", "Second Model", "Third Model"
+                 , "Fourth Model", "Fifth Model", "Final Model")
+
+aictab(cand.set = models, modnames = model_names)
+```
+
+### Predict test data with model
+```{r }
+test$prob <- predict.glm(logit_model, newdata = test, type = "response")
+
+```
+
+
+```{r model-accuracy}
+test %>% 
+  mutate(is_approved = if_else(prob>0.5, 1, 0)
+       , correct = if_else(approved == is_approved, 1,0)) %>% 
+  group_by(is_approved) %>% 
+  summarise(count = n(),
+            pct_correct = mean(correct))
+```
+
+```{r lender-prob}
+test %>% 
+  group_by(lender) %>% 
+  summarise(
+        approval_probability = mean(prob)
+     ,  actual_approval_rate = mean(approved)
+            )
+```
+
+
+```{r distribution-lender-pred}
+ggplot(test, mapping = aes(x = prob, color = lender)) +
+  geom_density() +
+  scale_x_continuous(name = "Probability of Loan Approval"
+                     , labels = scales::percent)
+```
+
+```{r by-fico-group}
+ggplot(test, mapping = aes(x = prob, color = fico_score_group)) +
+  geom_density() +
+  scale_x_continuous(name = "Probability of Loan Approval"
+                     , labels = scales::percent)
+```
+
+```{r by-fico-group}
+ggplot(test, mapping = aes(x = prob, color = fico_score_group)) +
+  geom_density() +
+  facet_wrap(vars(lender)) +
+  scale_x_continuous(name = "Probability of Loan Approval"
+                     , labels = scales::percent) +
+  theme(legend.position = "bottom")
+```
+
+```{r}
+ggplot(test, mapping = aes(x = loan_amount, y = prob, color = lender)) +
+  geom_smooth(se = FALSE) +
+  facet_wrap(vars(factor(fico_score_group, levels = c("excellent", "very_good"
+                                              , "good", "fair", "poor")))) +
+  scale_y_continuous(name = "Probability of Loan Approval"
+                     , labels = scales::percent) +
+  scale_x_continuous(name = "Loan Amount"
+                   , labels = scales::dollar)
+```
+
+
+
+
+
+
+
+
+
+
+
